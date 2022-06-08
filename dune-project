@@ -13,7 +13,7 @@
 (package 
  (name buffered_io)
  (synopsis "FIXME")
- (depends ocamlfind dune)
+ (depends ocamlfind dune extUnix logs)
 )
 
 

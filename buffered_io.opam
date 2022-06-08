@@ -6,7 +6,7 @@ authors: ["Tom Ridge <tom.j.ridge@googlemail.com>"]
 homepage: "https://github.com/tomjridge/FIXME"
 doc: "https://tomjridge.github.io/FIXME/ocamldoc/index.html"
 bug-reports: "https://github.com/tomjridge/FIXME/issues"
-depends: ["ocamlfind" "dune"]
+depends: ["ocamlfind" "dune" "extUnix" "logs"]
 build: [
   ["dune" "subst"] {pinned}
   [

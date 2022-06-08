@@ -1,3 +1,5 @@
+(* a bit of a mess
+
 (** Buffered io *)
 
 
@@ -11,7 +13,7 @@ module Pwrite = struct
 end
 
 module Pread = struct
-  let fun_t = off:int ref -> len:int -> buf:bytes -> int
+  type fun_t = off:int ref -> len:int -> buf:bytes -> int
   type t = {
     pread : off:int ref -> len:int -> buf:bytes -> int; 
   }
@@ -43,7 +45,7 @@ module Read_buffer = struct
     start:int ref; 
     valid:int ref;
   }
-  let create () = { buf=Bytes.create const_INITIAL_BUF_SIZE; start=0; valid=0 }
+  let create () = { buf=Bytes.create const_INITIAL_BUF_SIZE; start=ref 0; valid=ref 0 }
 end
 
 
@@ -53,11 +55,11 @@ type buffered = {
   rbuf: Read_buffer.t;
 }
   
-let create underlying =
+let create (underlying:File.t) =
   {
     underlying;
     wbuf=(
-      let start = File.size underlying in
+      let start = ref (underlying.size ()) in
       Write_buffer.create ~start);
     rbuf=Read_buffer.create ()
   }
@@ -66,9 +68,9 @@ let create underlying =
 (* flush the write buffer *)
 let flush (t:buffered) = 
   let buf = t.wbuf.buf |> Buffer.to_bytes in
-  let len = Bytes.length buf in
-  let n = t.underlying.pwrite ~off:(ref !t.wbuf.start) ~len:(Bytes.length buf) ~buf in
-  assert(n=len);
+  (* let len = Bytes.length buf in *)
+  let () = t.underlying.pwrite ~off:(ref (!(t.wbuf.start))) buf in
+  ()
   
 let maybe_flush (t:buffered) = 
   match t.wbuf.buf |> Buffer.length > Write_buffer.const_MAX_BUF_SIZE with
@@ -100,3 +102,4 @@ let pwrite (t:buffered) ~off ~len ~buf =
            don't bother to buffer just write out directly *)
         ()
     end
+*)

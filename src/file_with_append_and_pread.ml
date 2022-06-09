@@ -148,7 +148,7 @@ module V2_with_explicit_size = struct
 
 end
 
-module V3_with_buffer = struct
+module V3_with_write_buffer = struct
 
   module V2 = V2_with_explicit_size
 
@@ -214,3 +214,86 @@ module V3_with_buffer = struct
 end
 
 
+module V4_with_read_buffer = struct
+
+  module V3 = V3_with_write_buffer
+
+  type t = {
+    v3 : V3.t;
+    buf0 : bytes;
+    empty_slice : bytes;
+    mutable buf_pos : int;
+    mutable buf : bytes;
+  }
+  (** buf0 is the original bytes buffer; empty_slice is the slice of buf0 from 0 to 0; buf
+      is the slice of buf0 that is valid at buf_pos *)
+
+  let default_buf_sz = 4096  
+
+  let create ~path = 
+    V3.create ~path |> fun v3 -> 
+    let buf0 = Bytes.create default_buf_sz in
+    let empty_slice = Bytes.sub buf0 0 0 in
+    {v3; buf0; empty_slice; buf_pos=0; buf=empty_slice }
+
+  let open_ ~path =
+    V3.open_ ~path |> fun v3 -> 
+    let buf0 = Bytes.create default_buf_sz in
+    let empty_slice = Bytes.sub buf0 0 0 in
+    {v3; buf0; empty_slice; buf_pos=0; buf=empty_slice }
+
+  let flush t = V3.flush t.v3
+
+  let virt_size t = V3.virt_size t.v3
+
+  let ondisk_size t = V3.ondisk_size t.v3
+
+  let invalidate_read_buffer t = 
+    t.buf_pos <- (-1);
+    t.buf <- t.empty_slice;
+    ()
+
+  let pwrite t ~off ~buf = 
+    (* we have to check whether (off,buf) overlaps with the read buffer *)
+    let read_buffer_empty = Bytes.length t.buf = 0 in
+    let read_buffer_before = t.buf_pos + Bytes.length t.buf <= !off in
+    let read_buffer_after = t.buf_pos >= !off + Bytes.length buf in
+    match read_buffer_empty || read_buffer_before || read_buffer_after with
+    | true -> 
+      (* no overlap; do the pwrite *)
+      V3.pwrite t.v3 ~off ~buf;
+      ()
+    | false -> 
+      (* overlap with read buffer; we need to invalidate the read buffer after pwrite *)
+      V3.pwrite t.v3 ~off ~buf;
+      invalidate_read_buffer t;
+      ()
+
+  (* FIXME we aren't updating off properly; but when we replace off with a number we
+     should be good *)
+
+  let pread t ~off ~buf =
+    (* we need to take account of the write buffer as well *)
+    (* check if we can service this from the existing buffer *)
+    let len = Bytes.length buf in
+    let within_buf = !off >= t.buf_pos && !off+len <= Bytes.length t.buf in
+    match within_buf with
+    | true -> 
+      (* we can read from the buffer directly *)
+      Bytes.blit t.buf (!off - t.buf_pos) buf 0 len;
+      len
+    | false -> 
+      (* we pread into buf0 at the given position *)
+      let n = V3.pread t.v3 ~off ~buf:t.buf0 in
+      t.buf_pos <- !off;
+      t.buf <- Bytes.sub t.buf0 0 n;
+      (* then we blit from t.buf to the return buf *)
+      let len = min n len in
+      Bytes.blit t.buf 0 buf 0 len;
+      (* and return the number read *)
+      len
+
+end
+
+
+(* FIXME replace off refs with just a plain int *)

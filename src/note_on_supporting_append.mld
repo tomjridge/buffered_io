@@ -1,0 +1,6 @@
+NOTE supporting the append operation on files: the temptation is to use a file descriptor,
+and implement append by ensuring that the fd position is always at the end of the file;
+usually this works fine, but if we allow pread and pwrite, then it can be that pwrite
+extends the file, so that the fd position is no longer at the end of the file; then append
+requires an lseek to the end of the file; on Linux, if we try to use a file in O_APPEND
+mode, then pwrites will automatically go to the end of the file

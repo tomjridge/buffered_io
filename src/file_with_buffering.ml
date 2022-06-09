@@ -1,33 +1,8 @@
-(* 
-
-NOTE supporting the append operation on files: the temptation is to use a file descriptor,
-and implement append by ensuring that the fd position is always at the end of the file;
-usually this works fine, but if we allow pread and pwrite, then it can be that pwrite
-extends the file, so that the fd position is no longer at the end of the file; then append
-requires an lseek to the end of the file; on Linux, if we try to use a file in O_APPEND
-mode, then pwrites will automatically go to the end of the file
-
-*)
-
-(** Essentially the Y combinator; useful for anonymous recursive
-    functions. The k argument is the recursive callExample:
-
-    {[
-      iter_k (fun ~k n -> 
-          if n = 0 then 1 else n * k (n-1))
-
-    ]}
-
-
-*)
-let iter_k f (x:'a) =
-  let rec k x = f ~k x in
-  k x  
-
+(* See also ./note_on_supporting_append.mld *)
 
 module type Desired_pread_pwrite_intf = sig
   
-  type t
+  type t := Unix.file_descr
 
   (** [pwrite t ~off ~buf] writes buffer [buf] to [t] at offset [off]; writes all bytes,
       or throws an exception *)
@@ -41,8 +16,7 @@ module type Desired_pread_pwrite_intf = sig
 
 end 
 
-module Pread_pwrite : Desired_pread_pwrite_intf with type t=Unix.file_descr = struct
-  type t = Unix.file_descr
+module Pread_pwrite : Desired_pread_pwrite_intf = struct
 
   let pwrite t ~off ~buf = 
     let n = Pread_pwrite.pwrite t off buf in
@@ -50,34 +24,6 @@ module Pread_pwrite : Desired_pread_pwrite_intf with type t=Unix.file_descr = st
     ()
 
   let pread t ~off ~buf = Pread_pwrite.pread t off buf
-end
-
-type pwrite_t = (off:int -> buf:bytes -> unit)
-
-type pread_t = (off:int -> buf:bytes -> int)
-
-module Copy = struct
-
-  (* This copy assumes that there are [len] bytes to copy *)
-  let copy ~(src:pread_t) ~src_off ~len ~(dst:pwrite_t) ~dst_off = 
-    match len = 0 with
-    | true -> ()
-    | false -> 
-      let pread,pwrite = src,dst in
-      let buf_sz = 8192 in
-      let buf0 = Bytes.create buf_sz in
-      (src_off,dst_off,len) |> iter_k (fun ~k (src_off,dst_off,len) -> 
-          match len = 0 with
-          | true -> ()
-          | false -> 
-            let len' = min buf_sz len in
-            let buf' = Bytes.sub buf0 0 len' in
-            let n = pread ~off:src_off ~buf:buf' in
-            assert(n>0);
-            (* NOTE the following Bytes.sub is unnecessary if we assume there are len
-               bytes available, ie buf' has been filled *)
-            pwrite ~off:dst_off ~buf:(Bytes.sub buf' 0 n);
-            k (src_off+n,dst_off+n,len-n))
 end
 
 module V1_using_extunix = struct

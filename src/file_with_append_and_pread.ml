@@ -225,6 +225,12 @@ module V3_with_write_buffer = struct
 end
 
 
+(** With Irmin/Tezos, we often see the following pattern: read a small amount from offset;
+    read a larger amount from offset, or offset+delta, where delta is small. As separate
+    system calls, this is more expensive than if we just read the larger amount initially,
+    and cached it. This is what the following code attempts to do. At a given offset, we
+    read at least n bytes, and store them in a cache; then we attempt to service further
+    preads from that cache. *)
 module V4_with_read_buffer = struct
 
   module V3 = V3_with_write_buffer
@@ -291,15 +297,22 @@ module V4_with_read_buffer = struct
       Bytes.blit t.buf (off - t.buf_pos) buf 0 len;
       len
     | false -> 
-      (* we pread into buf0 at the given position *)
-      let n = V3.pread t.v3 ~off ~buf:t.buf0 in
-      t.buf_pos <- off;
-      t.buf <- Bytes.sub t.buf0 0 n;
-      (* then we blit from t.buf to the return buf *)
-      let len = min n len in
-      Bytes.blit t.buf 0 buf 0 len;
-      (* and return the number read *)
-      len
+      (* is the amount of data small? *)
+      match len <= Bytes.length t.buf0 with
+      | false -> 
+        (* a large read, which we can't service from the cache; so just go to disk *)
+        let n = V3.pread t.v3 ~off ~buf in
+        n
+      | true -> 
+        (* we pread into t.buf0 at the given position *)
+        let n = V3.pread t.v3 ~off ~buf:t.buf0 in
+        t.buf_pos <- off;
+        t.buf <- Bytes.sub t.buf0 0 n;
+        (* then we blit from t.buf to the return buf *)
+        let len = min n len in
+        Bytes.blit t.buf 0 buf 0 len;
+        (* and return the number read *)
+        len
 
 end
 

@@ -128,6 +128,8 @@ module V1_using_extunix = struct
     let off = Unix.lseek fd 0 SEEK_END in    
     pwrite fd ~off ~buf;
     ()
+
+  let close t = Unix.close t
 end
 
 (** This code keeps track of the on-disk size internally, in order to know the size of the
@@ -136,7 +138,7 @@ module V2_with_explicit_size = struct
 
   module V1 = V1_using_extunix
 
-  type t = {fd:Unix.file_descr; mutable sz:int }
+  type t = {fd:V1.t; mutable sz:int }
 
   let create path = 
     V1.create path |> fun fd ->
@@ -158,6 +160,8 @@ module V2_with_explicit_size = struct
 
   (* NOTE the following executes using a single pwrite system call *)
   let append t s : unit = pwrite t ~off:t.sz ~buf:(Bytes.unsafe_of_string s)
+
+  let close t = V1.close t.fd
 end
 
 (** At a write buffer, for appends at the end of the file (not for multiple adjacent
@@ -166,7 +170,7 @@ module V3_with_write_buffer = struct
 
   module V2 = V2_with_explicit_size
 
-  (* max_wbuf = max_write_buffer: we have a limit on the buffer size; currently 4MB *)
+  (** [default_max_wbuf] currently 4MiB *)
   let default_max_wbuf = 4*1024*1024
 
   type t = { v2:V2.t; wbuf:Buffer.t; mutable max_wbuf:int }
@@ -225,15 +229,21 @@ module V3_with_write_buffer = struct
     | true -> flush t; ()
     | false -> ()
 
+  let close t = 
+    flush t;
+    V2.close t.v2;
+    ()
+
 end
 
 
 (** With Irmin/Tezos, we often see the following pattern: read a small amount from offset;
-    read a larger amount from offset, or offset+delta, where delta is small. As separate
-    system calls, this is more expensive than if we just read the larger amount initially,
-    and cached it. This is what the following code attempts to do. At a given offset, we
-    read at least n bytes, and store them in a cache; then we attempt to service further
-    preads from that cache. *)
+    read a larger amount from offset, or from offset+delta, where delta is small
+    (i.e. read a bit more just beyond offset). As separate system calls, this is more
+    expensive than if we just read the larger amount initially, and cached it. This is
+    what the following code attempts to do. At a given offset, we read at least n bytes,
+    and store them in a cache; then we attempt to service further preads from that
+    cache. *)
 module V4_with_read_buffer = struct
 
   module V3 = V3_with_write_buffer
@@ -248,16 +258,17 @@ module V4_with_read_buffer = struct
   (** buf0 is the original bytes buffer; empty_slice is the slice of buf0 from 0 to 0; buf
       is the slice of buf0 that is valid at buf_pos *)
 
+  (** [default_rbuf_sz] currently 4096 *)
   let default_rbuf_sz = 4096  
 
   let virt_size t = V3.virt_size t.v3
 
   let ondisk_size t = V3.ondisk_size t.v3
 
-  let write_buffer_contents t = V3.write_buffer_contents t.v3
+  let debug_write_buffer_contents t = V3.write_buffer_contents t.v3
 
   (* expose read buffer, for testing *)
-  let read_buffer t = (t.buf_pos,t.rbuf)
+  let debug_read_buffer t = (t.buf_pos,t.rbuf)
 
   let create ?(max_wbuf=V3.default_max_wbuf) ?(rbuf_sz=default_rbuf_sz) path = 
     V3.create ~max_wbuf path |> fun v3 -> 
@@ -325,9 +336,29 @@ module V4_with_read_buffer = struct
 
   let append t s = V3.append t.v3 s
 
+  let close t = 
+    V3.close t.v3;
+    ()
+
 end
 
+(** Restricted interface exposed by {!V4_with_read_buffer} *)
+module type S4 = sig
+  type t
+  val virt_size : t -> int
+  val ondisk_size : t -> int
+  val debug_write_buffer_contents : t -> string
+  val debug_read_buffer : t -> int * bytes
+  val create : ?max_wbuf:int -> ?rbuf_sz:int -> string -> t
+  val open_ : ?max_wbuf:int -> ?rbuf_sz:int -> string -> t
+  val flush : t -> unit
+  val pwrite : t -> off:int -> buf:bytes -> unit
+  val pread : t -> off:int -> buf:bytes -> int
+  val append : t -> string -> unit
+  val close: t -> unit
+end
 
+module _ : S4 = V4_with_read_buffer
 
 module Test = struct
 
@@ -432,7 +463,7 @@ module Test = struct
     append t hello;
     flush t;
     let n = String.length hello in
-    assert(write_buffer_contents t = "");
+    assert(debug_write_buffer_contents t = "");
     assert(ondisk_size t = n);
     assert(virt_size t = n);
     let wor = " wor" in

@@ -1,15 +1,11 @@
 (* 
 
-sketch: use a normal fd, with a Buffer.t to buffer appends; use write when flushing the
-buffer; use pread to read (so that it doesn't disturb the fd's position at the end of the
-file); for pwrite, if the write is at the end of the file, then it is an append;
-otherwise, if it is wholly before the buffered data, we can issue it as a pwrite,
-otherwise we flush and pwrite.
-
-Then there are two notions of size: the size on disk, and the size with the buffer (ie the
-size on disk if we were to perform a flush first).
-
-We should first implement an UNBUFFERED version on top of the normal OCaml file intfs.
+NOTE supporting the append operation on files: the temptation is to use a file descriptor,
+and implement append by ensuring that the fd position is always at the end of the file;
+usually this works fine, but if we allow pread and pwrite, then it can be that pwrite
+extends the file, so that the fd position is no longer at the end of the file; then append
+requires an lseek to the end of the file; on Linux, if we try to use a file in O_APPEND
+mode, then pwrites will automatically go to the end of the file
 
 *)
 
@@ -78,6 +74,8 @@ module Copy = struct
             let buf' = Bytes.sub buf0 0 len' in
             let n = pread ~off:src_off ~buf:buf' in
             assert(n>0);
+            (* NOTE the following Bytes.sub is unnecessary if we assume there are len
+               bytes available, ie buf' has been filled *)
             pwrite ~off:dst_off ~buf:(Bytes.sub buf' 0 n);
             k (src_off+n,dst_off+n,len-n))
 end

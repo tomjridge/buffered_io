@@ -13,8 +13,6 @@ We should first implement an UNBUFFERED version on top of the normal OCaml file 
 
 *)
 
-module Log = Logs
-
 (** Essentially the Y combinator; useful for anonymous recursive
     functions. The k argument is the recursive callExample:
 
@@ -31,21 +29,62 @@ let iter_k f (x:'a) =
   k x  
 
 
-(* copied from layers/util.ml *)
+module type Desired_pread_pwrite_intf = sig
+  
+  type t
 
-module Pwrite = struct
-  type t = {
-    pwrite: off:int ref -> bytes -> unit;
-  }
+  (** [pwrite t ~off ~buf] writes buffer [buf] to [t] at offset [off]; writes all bytes,
+      or throws an exception *)
+  val pwrite: t -> off:int -> buf:bytes -> unit
+
+  (** [pread t ~off ~buf] attempts to fill buffer [buf] with data from [t] at offset
+      [off]; returns the number of bytes actually read; this may be less than the size of
+      [buf] iff we are reading near the end of the file; throws an exception in
+      exceptional circumstances *)
+  val pread: t -> off:int -> buf:bytes -> int
+
+end 
+
+module Pread_pwrite : Desired_pread_pwrite_intf with type t=Unix.file_descr = struct
+  type t = Unix.file_descr
+
+  let pwrite t ~off ~buf = 
+    let n = Pread_pwrite.pwrite t off buf in
+    assert(n=Bytes.length buf);
+    ()
+
+  let pread t ~off ~buf = Pread_pwrite.pread t off buf
 end
 
-module Pread = struct
-  type t = {
-    pread : off:int ref -> len:int -> buf:bytes -> int; 
-  }
+type pwrite_t = (off:int -> buf:bytes -> unit)
+
+type pread_t = (off:int -> buf:bytes -> int)
+
+module Copy = struct
+
+  (* This copy assumes that there are [len] bytes to copy *)
+  let copy ~(src:pread_t) ~src_off ~len ~(dst:pwrite_t) ~dst_off = 
+    match len = 0 with
+    | true -> ()
+    | false -> 
+      let pread,pwrite = src,dst in
+      let buf_sz = 8192 in
+      let buf0 = Bytes.create buf_sz in
+      (src_off,dst_off,len) |> iter_k (fun ~k (src_off,dst_off,len) -> 
+          match len = 0 with
+          | true -> ()
+          | false -> 
+            let len' = min buf_sz len in
+            let buf' = Bytes.sub buf0 0 len' in
+            let n = pread ~off:src_off ~buf:buf' in
+            assert(n>0);
+            pwrite ~off:dst_off ~buf:(Bytes.sub buf' 0 n);
+            k (src_off+n,dst_off+n,len-n))
 end
 
-module File = struct
+module V1_using_extunix = struct
+
+  type t = Unix.file_descr
 
   let create ~path =
     let ok = not (Sys.file_exists path) in
@@ -62,10 +101,7 @@ module File = struct
   (* read into buf, as much as we can; update off; return the number of bytes read; if
      this is less than |buf|, then we hit the end of the file; FIXME it seems weird to
      update off whilst also returning the length; perhaps prefer one or the other *)
-  let pread fd ~off ~buf =
-    let n = Pread_pwrite.pread fd (!off) buf in
-    off:=!off + n;
-    n
+  let pread fd ~off ~buf : int = Pread_pwrite.pread fd ~off ~buf
 
   let read_string fd ~off ~len = 
     let buf = Bytes.create len in
@@ -73,12 +109,9 @@ module File = struct
     Bytes.unsafe_to_string (Bytes.sub buf 0 n)
 
   (* write from buf as much as we can; update off; assumes the entire buffer is written *)
-  let pwrite fd ~off ~buf : unit =
-    let nwrit = Pread_pwrite.pwrite fd !off buf in
-    assert(nwrit = Bytes.length buf);
-    off:=!off + nwrit;
-    ()
+  let pwrite fd ~off ~buf : unit = Pread_pwrite.pwrite fd ~off ~buf 
 
+  (* NOTE calling stat is a syscall, which is somewhat costly *)
   let size fn = Unix.((stat fn).st_size)
 
   (* NOTE the problem with this implementation is that pwrite may have altered the length
@@ -91,61 +124,41 @@ module File = struct
  *)
   let append fd s = 
     (* nothing that follows will alter buf, so unsafe_of_string is safe *)
-    let buf,len = Bytes.unsafe_of_string s,String.length s in        
-    (* ensure positioned at the end; O_APPEND on Linux means that pwrites go to end of
-       file! *)
-    ignore(Unix.lseek fd 0 SEEK_END);    
-    let nwrit = Unix.write fd buf 0 len in
-    assert(nwrit = len);
+    let buf = Bytes.unsafe_of_string s in        
+    (* ensure positioned at the end; NOTE that a file opened O_APPEND on Linux means that
+       pwrites go to end of file! so we can't use O_APPEND with pwrite *)
+    let off = Unix.lseek fd 0 SEEK_END in    
+    pwrite fd ~off ~buf;
     ()
-
-  let copy ~(src:Pread.t) ~(dst:Pwrite.t) ~src_off ~len ~dst_off = 
-    match len = 0 with
-    | true -> ()
-    | false -> 
-      let Pread.{pread},Pwrite.{pwrite} = src,dst in
-      let src_off = ref src_off in
-      let dst_off = ref dst_off in
-      let buf_sz = 8192 in
-      let buf = Bytes.create buf_sz in
-      len |> iter_k (fun ~k len -> 
-          match len <=0 with
-          | true -> ()
-          | false -> 
-            let n = pread ~off:src_off ~len:(min buf_sz len) ~buf in
-            (if n=0 then Log.warn (fun m -> m "pread returned n=0 bytes, off=%d len=%d" !src_off (min buf_sz len)));
-            assert(n>0);
-            pwrite ~off:dst_off (Bytes.sub buf 0 n);
-            k (len - n))
 end
 
 
 module V2_with_explicit_size = struct
 
+  module V1 = V1_using_extunix
+
   type t = {fd:Unix.file_descr; mutable sz:int }
 
   let create ~path = 
-    File.create ~path |> fun fd ->
+    V1.create ~path |> fun fd ->
     {fd;sz=Unix.(lseek fd 0 SEEK_END)}
 
   let open_ ~path =
-    File.open_ ~path |> fun fd ->
+    V1.open_ ~path |> fun fd ->
     {fd;sz=Unix.(lseek fd 0 SEEK_END)}
 
   let pread t ~off ~buf = 
-    File.pread t.fd ~off ~buf
+    V1.pread t.fd ~off ~buf
 
   let pwrite t ~off ~buf =
-    File.pwrite t.fd ~off ~buf;
-    t.sz <- max (!off + Bytes.length buf) t.sz;
+    V1.pwrite t.fd ~off ~buf;
+    t.sz <- max (off + Bytes.length buf) t.sz;
     ()
   
   let size t = t.sz
 
   (* NOTE the following executes using a single pwrite system call *)
-  let append t s = 
-    pwrite t ~off:(ref t.sz) ~buf:(Bytes.unsafe_of_string s)
-
+  let append t s : unit = pwrite t ~off:t.sz ~buf:(Bytes.unsafe_of_string s)
 end
 
 module V3_with_write_buffer = struct
@@ -181,7 +194,7 @@ module V3_with_write_buffer = struct
   let ondisk_size t = t.buf_pos
 
   let pread t ~off ~buf =
-    match !off + Bytes.length buf >= t.buf_pos with
+    match off + Bytes.length buf >= t.buf_pos with
     | true -> 
       flush t;
       V2.pread t.v2 ~off ~buf
@@ -190,12 +203,12 @@ module V3_with_write_buffer = struct
       V2.pread t.v2 ~off ~buf
 
   let pwrite t ~off ~buf =
-    match !off + Bytes.length buf >= t.buf_pos with
+    match off + Bytes.length buf >= t.buf_pos with
     | true -> 
       flush t;
       V2.pwrite t.v2 ~off ~buf;
       (* may need to update buf_pos so it is positioned at end of file *)
-      t.buf_pos <- max t.buf_pos (!off + Bytes.length buf);
+      t.buf_pos <- max t.buf_pos (off + Bytes.length buf);
       ()
     | false -> 
       (* can pwrite to non-buffered part of file *)
@@ -256,8 +269,8 @@ module V4_with_read_buffer = struct
   let pwrite t ~off ~buf = 
     (* we have to check whether (off,buf) overlaps with the read buffer *)
     let read_buffer_empty = Bytes.length t.buf = 0 in
-    let read_buffer_before = t.buf_pos + Bytes.length t.buf <= !off in
-    let read_buffer_after = t.buf_pos >= !off + Bytes.length buf in
+    let read_buffer_before = t.buf_pos + Bytes.length t.buf <= off in
+    let read_buffer_after = t.buf_pos >= off + Bytes.length buf in
     match read_buffer_empty || read_buffer_before || read_buffer_after with
     | true -> 
       (* no overlap; do the pwrite *)
@@ -269,23 +282,20 @@ module V4_with_read_buffer = struct
       invalidate_read_buffer t;
       ()
 
-  (* FIXME we aren't updating off properly; but when we replace off with a number we
-     should be good *)
-
   let pread t ~off ~buf =
-    (* we need to take account of the write buffer as well *)
+    (* do we need to take account of the write buffer as well? *)
     (* check if we can service this from the existing buffer *)
     let len = Bytes.length buf in
-    let within_buf = !off >= t.buf_pos && !off+len <= Bytes.length t.buf in
+    let within_buf = off >= t.buf_pos && off+len <= Bytes.length t.buf in
     match within_buf with
     | true -> 
       (* we can read from the buffer directly *)
-      Bytes.blit t.buf (!off - t.buf_pos) buf 0 len;
+      Bytes.blit t.buf (off - t.buf_pos) buf 0 len;
       len
     | false -> 
       (* we pread into buf0 at the given position *)
       let n = V3.pread t.v3 ~off ~buf:t.buf0 in
-      t.buf_pos <- !off;
+      t.buf_pos <- off;
       t.buf <- Bytes.sub t.buf0 0 n;
       (* then we blit from t.buf to the return buf *)
       let len = min n len in
@@ -295,5 +305,3 @@ module V4_with_read_buffer = struct
 
 end
 
-
-(* FIXME replace off refs with just a plain int *)

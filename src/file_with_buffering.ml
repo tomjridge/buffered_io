@@ -1,5 +1,7 @@
 (* See also ./note_on_supporting_append.mld *)
 
+(** Interface provided by pread/pwrite; compared to the normal pread/pwrite, we assume
+    that the operations are repeated until all bytes are read/written. *)
 module type Desired_pread_pwrite_intf = sig
   
   type t := Unix.file_descr
@@ -16,6 +18,7 @@ module type Desired_pread_pwrite_intf = sig
 
 end 
 
+(** An implementation of the desired pread/pwrite interface, using extUnix *)
 module Pread_pwrite : Desired_pread_pwrite_intf = struct
 
   let pwrite t ~off ~buf = 
@@ -26,6 +29,8 @@ module Pread_pwrite : Desired_pread_pwrite_intf = struct
   let pread t ~off ~buf = Pread_pwrite.pread t off buf
 end
 
+(** A standard file implementation; no buffering; size is expensive (1 syscall); append is
+    expensive (2 syscalls... 1 to position at end of file) *)
 module V1_using_extunix = struct
 
   type t = Unix.file_descr
@@ -110,8 +115,8 @@ module V2_with_explicit_size = struct
   let close t = V1.close t.fd
 end
 
-(** At a write buffer, for appends at the end of the file (not for multiple adjacent
-    pwrites - these are still separate syscalls) *)
+(** This adds a write buffer on top of V2, for appends at the end of the file (not for
+    multiple adjacent pwrites - these are still separate syscalls) *)
 module V3_with_write_buffer = struct
 
   module V2 = V2_with_explicit_size
@@ -183,13 +188,13 @@ module V3_with_write_buffer = struct
 end
 
 
-(** With Irmin/Tezos, we often see the following pattern: read a small amount from offset;
-    read a larger amount from offset, or from offset+delta, where delta is small
-    (i.e. read a bit more just beyond offset). As separate system calls, this is more
-    expensive than if we just read the larger amount initially, and cached it. This is
-    what the following code attempts to do. At a given offset, we read at least n bytes,
-    and store them in a cache; then we attempt to service further preads from that
-    cache. *)
+(** This adds a read buffer on top of V3. With Irmin/Tezos, we often see the following
+    pattern: read a small amount from offset; read a larger amount from offset, or from
+    offset+delta, where delta is small (i.e. read a bit more just beyond offset). As
+    separate system calls, this is more expensive than if we just read the larger amount
+    initially, and cached it. This is what the following code attempts to do. At a given
+    offset, we read at least n bytes, and store them in a cache; then we attempt to
+    service further preads from that cache. *)
 module V4_with_read_buffer = struct
 
   module V3 = V3_with_write_buffer
@@ -306,6 +311,7 @@ end
 
 module _ : S4 = V4_with_read_buffer
 
+(** Some simple tests for the above implementations *)
 module Test = struct
 
   let fn = "./test.tmp"

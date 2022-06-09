@@ -1,0 +1,4 @@
+(executable
+ (public_name "test")
+ (modules Test)
+ (libraries buffered_io))
